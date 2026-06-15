@@ -7157,6 +7157,16 @@ impl Connection {
             .get_remote_nat_traversal_addresses())
     }
 
+    /// Get the currently advertised nat traversal addresses received through REACH_OUT frames.
+    pub fn get_server_reach_out_nat_traversal_addresses(
+        &self,
+    ) -> Result<Vec<SocketAddr>, n0_nat_traversal::Error> {
+        Ok(self
+            .n0_nat_traversal
+            .server_side()?
+            .get_remote_nat_traversal_addresses())
+    }
+
     /// Initiates a new nat traversal round
     ///
     /// A nat traversal round involves advertising the client's local addresses in
