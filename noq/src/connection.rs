@@ -936,6 +936,20 @@ impl Connection {
         conn.inner.get_remote_nat_traversal_addresses()
     }
 
+    /// Get the addresses this connection was asked to reach out to
+    ///
+    /// These are the client's addresses as they arrived in `REACH_OUT` frames, and they are what
+    /// the current nat traversal round is probing. Only available on the server side of the
+    /// connection; the client side has [`Connection::get_remote_nat_traversal_addresses`].
+    pub fn get_reach_out_nat_traversal_addresses(
+        &self,
+    ) -> Result<Vec<SocketAddr>, n0_nat_traversal::Error> {
+        let conn = self
+            .0
+            .lock_without_waking("get_reach_out_nat_traversal_addresses");
+        conn.inner.get_reach_out_nat_traversal_addresses()
+    }
+
     /// Initiates a new nat traversal round
     ///
     /// A nat traversal round involves advertising the client's local addresses in `REACH_OUT`

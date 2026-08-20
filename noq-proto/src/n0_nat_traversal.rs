@@ -187,6 +187,14 @@ impl State {
         }
     }
 
+    pub(crate) fn server_side(&self) -> Result<&ServerState, Error> {
+        match self {
+            Self::NotNegotiated => Err(Error::ExtensionNotNegotiated),
+            Self::ClientSide(_) => Err(Error::WrongConnectionSide),
+            Self::ServerSide(server_side) => Ok(server_side),
+        }
+    }
+
     pub(crate) fn server_side_mut(&mut self) -> Result<&mut ServerState, Error> {
         match self {
             Self::NotNegotiated => Err(Error::ExtensionNotNegotiated),
@@ -780,6 +788,20 @@ impl ServerState {
         self.round
     }
 
+    /// The remote addresses this round is probing, learned from REACH_OUT frames.
+    ///
+    /// Sorted, because the addresses are held in a hash map and the order they come out in is
+    /// not otherwise meaningful.
+    pub(crate) fn get_remote_nat_traversal_addresses(&self) -> Vec<SocketAddr> {
+        let mut addresses: Vec<SocketAddr> = self
+            .remotes
+            .keys()
+            .map(|(ip, port)| SocketAddr::new(*ip, *port))
+            .collect();
+        addresses.sort_unstable();
+        addresses
+    }
+
     /// Handles a received REACH_OUT frame.
     ///
     /// This might ignore the reach out frame if it belongs to an older round or if the
@@ -958,6 +980,31 @@ mod tests {
         // After max attempts, probes are removed
         state.queue_retries();
         assert!(state.next_probe_addr().is_none());
+    }
+
+    #[test]
+    fn server_state_reports_reach_out_remote_addresses() {
+        let mut state = ServerState::new(4, 2);
+        let first = SocketAddr::from(([1, 1, 1, 2], 2222));
+        let second = SocketAddr::from(([1, 1, 1, 1], 1111));
+
+        for addr in [first, second, first] {
+            state
+                .handle_reach_out(
+                    ReachOut {
+                        round: 1u32.into(),
+                        ip: addr.ip(),
+                        port: addr.port(),
+                    },
+                    false,
+                )
+                .unwrap();
+        }
+
+        assert_eq!(
+            state.get_remote_nat_traversal_addresses(),
+            vec![second, first]
+        );
     }
 
     #[test]
