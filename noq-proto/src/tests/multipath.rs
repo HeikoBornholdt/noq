@@ -2293,3 +2293,58 @@ fn regression_discarded_path_stats_are_up_to_date() -> TestResult {
 
     Ok(())
 }
+
+/// A path this endpoint abandons is discarded even when the peer never abandons it back.
+///
+/// The peer echoes PATH_ABANDON only for a path it has state for. A path it never learned of, which
+/// is what a candidate address that never validated is, leaves it with nothing to echo: its
+/// `close_path_inner` finds no such path and queues nothing. The drain that frees the path here has
+/// to be started by the abandon itself, or the path stays in the connection for as long as the
+/// connection lives.
+#[test]
+fn abandon_path_the_peer_never_learned() -> TestResult {
+    let _guard = subscribe();
+    let mut pair = ConnPair::builder().enable_multipath().connect();
+    let mut second_client_addr = pair.routes.as_basic().client_addr;
+    let mut second_server_addr = pair.routes.as_basic().server_addr;
+    second_client_addr.set_port(second_client_addr.port() + 1);
+    second_server_addr.set_port(second_server_addr.port() + 1);
+    pair.routes = ManyToManyRouting::simple_symmetric(
+        [pair.routes.as_basic().client_addr, second_client_addr],
+        [pair.routes.as_basic().server_addr, second_server_addr],
+    )
+    .into();
+
+    let second_path = FourTuple {
+        local_ip: Some(second_client_addr.ip()),
+        remote: second_server_addr,
+    };
+
+    // Opened and abandoned without a single packet in between, so the server never hears of the
+    // path and has no state to abandon back.
+    let path_id = pair.open_path(Client, second_path, PathStatus::Available)?;
+    pair.close_path(Client, path_id, 0u8.into())?;
+    pair.drive();
+
+    assert_matches!(
+        pair.poll(Client),
+        Some(Event::Path(PathEvent::Abandoned { id, .. })) if id == path_id
+    );
+
+    let mut discarded = false;
+    while let Some(event) = pair.poll(Client) {
+        if matches!(event, Event::Path(PathEvent::Discarded { id, .. }) if id == path_id) {
+            discarded = true;
+        }
+    }
+    assert!(
+        discarded,
+        "the abandoned path was never discarded, so its state stays for the life of the connection"
+    );
+    // The event is the announcement; this is the state it announces. `paths` lists a path that has
+    // been abandoned and not yet discarded, so it is what says the connection has let go of it.
+    assert!(!pair.paths(Client).contains(&path_id));
+    assert!(pair.path_status(Client, path_id).is_err());
+
+    Ok(())
+}

@@ -274,6 +274,17 @@ pub(super) struct PathData {
     /// This will only ever be set from false to true.
     pub(super) draining: bool,
 
+    /// Whether this endpoint armed the discard timer itself, when it abandoned the path.
+    ///
+    /// Kept apart from [`Self::draining`] on purpose. That one says the peer's PATH_ABANDON was
+    /// seen, and the grant of a further path id hangs off it; this one says only that the path
+    /// will be freed even if that frame never comes, which is the case for a path the peer has
+    /// no state for. Sharing one flag would either lose the grant or hand out a path id per
+    /// abandon that no peer ever asked to have back.
+    ///
+    /// This will only ever be set from false to true.
+    pub(super) self_drain_armed: bool,
+
     /// Snapshot of the qlog recovery metrics
     #[cfg(feature = "qlog")]
     recovery_metrics: RecoveryMetrics,
@@ -344,6 +355,7 @@ impl PathData {
             keep_alive: config.default_path_keep_alive_interval,
             permit_idle_reset: true,
             draining: false,
+            self_drain_armed: false,
             #[cfg(feature = "qlog")]
             recovery_metrics: RecoveryMetrics::default(),
             generation,
@@ -392,6 +404,7 @@ impl PathData {
             keep_alive: prev.keep_alive,
             permit_idle_reset: true,
             draining: false,
+            self_drain_armed: false,
             #[cfg(feature = "qlog")]
             recovery_metrics: prev.recovery_metrics.clone(),
             generation,

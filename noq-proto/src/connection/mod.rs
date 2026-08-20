@@ -719,8 +719,7 @@ impl Connection {
                 // The path has already been informed that outstanding acks should be sent
                 // immediately
                 PathTimer::MaxAckDelay => false,
-                // This timer should not be set, for completeness it's not kept as it's set when
-                // the PATH_ABANDON frame is sent.
+                // Armed below, once the abandon has been recorded, so it is not kept here.
                 PathTimer::PathDrained => false,
                 // Sent packets still need to be identified as lost to trigger timely
                 // retransmission.
@@ -735,6 +734,46 @@ impl Connection {
                 let qlog = self.qlog.with_time(now);
                 self.timers.stop(Timer::PerPath(path_id, timer), qlog);
             }
+        }
+
+        // Start draining, which is what eventually frees this path's state.
+        //
+        // The PathDrained timer is otherwise armed in one place only, where a peer's
+        // PATH_ABANDON arrives, so a path this endpoint abandons is discarded only if the peer
+        // abandons it back. A peer that has no state for the path never does: its
+        // `close_path_inner` returns `ClosedPath` and queues nothing, which is exactly what a
+        // candidate address that never validated looks like. Such a path stays in `self.paths`
+        // for as long as the connection lives, keeps answering `path_status`, and keeps
+        // counting in `max_pto_for_space`.
+        //
+        // Three PTO after the abandon, the same window the receive side waits. Started here
+        // rather than where the PATH_ABANDON frame is written, because that site borrows the
+        // packet builder, and because a frame that never goes out must not leave the path
+        // behind for ever.
+        //
+        // Not while the connection itself is closing: `close_common` resets every timer, and a
+        // drain armed after that outlives the reset and fires into a drained connection, where
+        // the endpoint events it wants to push are no longer allowed. A closing connection
+        // frees all of its paths at once anyway.
+        //
+        // Deliberately not the `draining` flag, and deliberately without the grant of a further
+        // path id that the receive side makes. Both of those belong to the peer having asked
+        // for the path back: the grant is how a retired id is returned to a peer that knows it
+        // is retired, and `set_max_concurrent_paths` already discounts abandoned paths when it
+        // works out how many ids are in use. Handing one out per local abandon would let the
+        // peer hold more concurrent path ids than it was configured for, and it would do so for
+        // exactly the paths the peer never knew about.
+        if !self.state.is_closed()
+            && let Some(path) = self.paths.get_mut(&path_id)
+            && !mem::replace(&mut path.data.self_drain_armed, true)
+        {
+            let ack_delay = self.ack_frequency.max_ack_delay_for_pto();
+            let pto = path.data.rtt.pto_base() + ack_delay;
+            self.timers.set(
+                Timer::PerPath(path_id, PathTimer::PathDrained),
+                now + 3 * pto,
+                self.qlog.with_time(now),
+            );
         }
 
         // Set the loss detection timer again, as now it should only be set
