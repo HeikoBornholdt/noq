@@ -4947,14 +4947,19 @@ fn regression_initial_coalescing_large_cid() {
 /// Handshake space used to write into that tail: a failed `MIN_PACKET_SPACE` debug assertion
 /// in the debug profile, a packet written past the end of the datagram in the release
 /// profile.
+///
+/// The tail has to stay below `MIN_PACKET_SPACE`, above that it holds a whole packet and
+/// coalescing into it is fine. `min_mtu` at `MIN_INITIAL_SIZE` and an `initial_mtu` of 1250
+/// leave 50 bytes.
 #[test]
 fn close_during_handshake_does_not_coalesce_into_a_too_small_datagram_tail() {
     let _guard = subscribe();
 
+    const MIN_MTU: u16 = MIN_INITIAL_SIZE;
     const MTU: u16 = 1250;
 
     let mut transport = TransportConfig::default();
-    transport.min_mtu(MTU);
+    transport.min_mtu(MIN_MTU);
     transport.initial_mtu(MTU);
     transport.mtu_discovery_config(None);
     let transport = Arc::new(transport);
