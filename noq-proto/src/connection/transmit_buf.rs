@@ -167,7 +167,7 @@ impl<'a> TransmitBuf<'a> {
         } else {
             // This datagram is shorter than the segment size, so the batch has to end here.
             self.buf_capacity = self.buf.len();
-            self.max_datagrams = NonZeroUsize::MIN.saturating_add(self.num_datagrams - 1);
+            self.max_datagrams = NonZeroUsize::new(self.num_datagrams).unwrap_or(NonZeroUsize::MIN);
         }
     }
 
