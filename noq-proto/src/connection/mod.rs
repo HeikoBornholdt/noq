@@ -1536,23 +1536,6 @@ impl Connection {
                 };
             }
 
-            // An earlier packet space hands us its datagram to coalesce into, but what is
-            // left of it may be too small for a whole packet: a CONNECTION_CLOSE packet
-            // padded to MIN_INITIAL_SIZE inside a larger datagram leaves such a tail.
-            // Finish the datagram off, so a new one is started below rather than a packet
-            // being written past the end of this one.
-            let datagram_remaining = transmit.datagram_remaining_mut();
-            if transmit.datagram_start_offset() < transmit.len()
-                && datagram_remaining > 0
-                && datagram_remaining < MIN_PACKET_SPACE
-            {
-                trace!(
-                    datagram_remaining,
-                    "datagram too small for another packet, finishing it"
-                );
-                transmit.finish_datagram();
-            }
-
             // We want to send on this space, check congestion control if we can. But only
             // if we will need to start a new datagram. If we are coalescing into an already
             // started datagram we do not need to check congestion control again.
@@ -1612,8 +1595,9 @@ impl Connection {
                 pad_datagram = PadDatagram::No;
             }
 
-            // A datagram with a tail too small for a packet was finished above, so
-            // anything we coalesce into still has room for a whole packet.
+            // If a previous space left a datagram whose tail is too small for another
+            // packet, its CONNECTION_CLOSE branch finished that datagram, so anything we
+            // coalesce into still has room for a whole packet.
             if transmit.datagram_start_offset() < transmit.len() {
                 debug_assert!(transmit.datagram_remaining_mut() >= MIN_PACKET_SPACE);
             }
@@ -1727,13 +1711,17 @@ impl Connection {
                 // Send a close frame in every possible space for robustness, per
                 // RFC9000 "Immediate Close during the Handshake". Don't bother trying
                 // to send anything else.
-                // The space left in the datagram is checked at the top of the loop,
-                // which finishes it if the next packet would not fit.
                 // TODO(flub): We need to keep track of per-space pending CONNECTION_CLOSE to
                 //    be able to send these across multiple calls to poll_transmit. And also
                 //    add space checks for CONNECTION_CLOSE in space_can_send so it would
                 //    stop a GSO batch if the datagram is too small for another
                 //    CONNECTION_CLOSE packet.
+                // If what is left of this datagram is too small for another packet, finish
+                // it so the next space starts a fresh datagram rather than a packet being
+                // coalesced past its end.
+                if transmit.datagram_remaining_mut() < MIN_PACKET_SPACE {
+                    transmit.finish_datagram();
+                }
                 return PollPathSpaceStatus::WrotePacket {
                     last_packet_number: last_pn,
                     pad_datagram,
