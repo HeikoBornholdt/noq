@@ -13,6 +13,7 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use clap::Parser;
+use noq::{PathError, PathStatus};
 use proto::{TransportConfig, crypto::rustls::QuicClientConfig};
 use rustls::pki_types::CertificateDer;
 use tokio_stream::StreamExt;
@@ -47,6 +48,15 @@ struct Opt {
     #[clap(long = "bind", default_value = "[::]:0")]
     bind: SocketAddr,
 }
+
+/// Keep-alive interval of every path, set on this side only.
+const KEEP_ALIVE: Duration = Duration::from_secs(5);
+
+/// Idle timeout of every path.
+const PATH_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How long to stay connected after the response, to watch the backup path.
+const LINGER: Duration = Duration::from_secs(40);
 
 fn main() {
     tracing::subscriber::set_global_default(
@@ -105,7 +115,10 @@ async fn run(options: Opt) -> Result<()> {
     let mut transport = TransportConfig::default();
     transport
         .send_observed_address_reports(true)
-        .receive_observed_address_reports(true);
+        .receive_observed_address_reports(true)
+        .max_concurrent_multipath_paths(2)
+        .default_path_keep_alive_interval(Some(KEEP_ALIVE))
+        .default_path_max_idle_timeout(Some(PATH_IDLE_TIMEOUT));
     let mut client_config =
         noq::ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto)?));
     client_config.transport_config(Arc::new(transport));
@@ -129,6 +142,14 @@ async fn run(options: Opt) -> Result<()> {
             info!(%new_addr, "new external address report");
         }
     });
+
+    let mut path_events = conn.path_events();
+    tokio::spawn(async move {
+        while let Some(Ok(event)) = path_events.next().await {
+            info!(?event, "path event");
+        }
+    });
+    open_backup_path(&conn, remote).await?;
 
     let (mut send, mut recv) = conn
         .open_bi()
@@ -159,11 +180,37 @@ async fn run(options: Opt) -> Result<()> {
     );
     io::stdout().write_all(&resp).unwrap();
     io::stdout().flush().unwrap();
+    eprintln!("staying connected for {}s", LINGER.as_secs());
+    tokio::time::sleep(LINGER).await;
     conn.close(0u32.into(), b"done");
 
     // Give the server a fair chance to receive the close packet
     endpoint.wait_all_draining().await;
 
+    Ok(())
+}
+
+/// Opens a second path to `remote`, marks it as backup and keeps it alive from this side only.
+///
+/// The server is expected to answer the keep-alive pings without keeping the path alive itself.
+async fn open_backup_path(conn: &noq::Connection, remote: SocketAddr) -> Result<()> {
+    // The server needs a moment to issue connection IDs for the second path.
+    let path = loop {
+        match conn.open_path(remote, PathStatus::Available).await {
+            Ok(path) => break path,
+            Err(PathError::RemoteCidsExhausted) => {
+                tokio::time::sleep(Duration::from_millis(20)).await
+            }
+            Err(e) => return Err(anyhow!("failed to open backup path: {}", e)),
+        }
+    };
+    path.set_status(PathStatus::Backup)?;
+    eprintln!(
+        "backup path {:?} open: keep-alive {}s, idle timeout {}s",
+        path.id(),
+        KEEP_ALIVE.as_secs(),
+        PATH_IDLE_TIMEOUT.as_secs()
+    );
     Ok(())
 }
 
