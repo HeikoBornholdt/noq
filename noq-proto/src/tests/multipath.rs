@@ -2299,3 +2299,64 @@ fn regression_discarded_path_stats_are_up_to_date() -> TestResult {
 
     Ok(())
 }
+
+/// noq gives up on a path whose validation never completes, and then never frees it.
+///
+/// Nothing here closes the path. `PathTimer::PathIdle` abandons it as
+/// `PathAbandonReason::TimedOut`, which is the same local abandon `close_path` performs, and the
+/// peer never learned the path, so it never abandons it back. Nothing else frees it either.
+#[test]
+fn path_abandoned_by_its_own_idle_timer_is_discarded() -> TestResult {
+    let _guard = subscribe();
+    let mut pair = ConnPair::builder().enable_multipath().connect();
+
+    // Nothing routes this address, so every packet to it is dropped: the path never validates and
+    // the server never learns that it exists.
+    let mut black_hole = pair.routes.as_basic().server_addr;
+    black_hole.set_port(black_hole.port() + 1);
+    let path_id = pair.open_path(
+        Client,
+        FourTuple::from_remote(black_hole),
+        PathStatus::Available,
+    )?;
+
+    // Only this path is given an idle timeout, so it is the only one that can time out.
+    let now = pair.time;
+    pair.conn_mut(Client)
+        .set_path_max_idle_timeout(now, path_id, Some(Duration::from_millis(100)))?;
+
+    // `drive` stops as soon as the only timers left are idle timers, so the clock has to be pushed
+    // past the path idle timeout by hand.
+    let mut abandoned = false;
+    let mut discarded = false;
+    for _ in 0..16 {
+        pair.drive();
+        while let Some(event) = pair.poll(Client) {
+            match event {
+                Event::Path(PathEvent::Abandoned {
+                    id,
+                    reason: PathAbandonReason::TimedOut,
+                    ..
+                }) if id == path_id => abandoned = true,
+                Event::Path(PathEvent::Discarded { id, .. }) if id == path_id => discarded = true,
+                _ => {}
+            }
+        }
+        if discarded || !pair.advance_time() {
+            break;
+        }
+    }
+
+    assert!(
+        abandoned,
+        "noq never gave up on the path by itself, so this test proves nothing"
+    );
+    assert!(
+        discarded,
+        "noq abandoned the path itself and then never discarded it"
+    );
+    assert!(!pair.paths(Client).contains(&path_id));
+    assert!(pair.path_status(Client, path_id).is_err());
+
+    Ok(())
+}
