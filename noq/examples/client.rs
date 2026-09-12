@@ -5,7 +5,7 @@
 use std::{
     fs,
     io::{self, Write},
-    net::{SocketAddr, ToSocketAddrs},
+    net::{SocketAddr, ToSocketAddrs, UdpSocket},
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -13,6 +13,7 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use clap::Parser;
+use noq::{PathId, PathStatus};
 use proto::{TransportConfig, crypto::rustls::QuicClientConfig};
 use rustls::pki_types::CertificateDer;
 use tokio_stream::StreamExt;
@@ -47,6 +48,12 @@ struct Opt {
     #[clap(long = "bind", default_value = "[::]:0")]
     bind: SocketAddr,
 }
+
+/// Idle timeout of the extra path, set on that path alone.
+const PATH_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long to stay connected after the response, to watch the abandoned path.
+const LINGER: Duration = Duration::from_secs(30);
 
 fn main() {
     tracing::subscriber::set_global_default(
@@ -105,7 +112,8 @@ async fn run(options: Opt) -> Result<()> {
     let mut transport = TransportConfig::default();
     transport
         .send_observed_address_reports(true)
-        .receive_observed_address_reports(true);
+        .receive_observed_address_reports(true)
+        .max_concurrent_multipath_paths(2);
     let mut client_config =
         noq::ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto)?));
     client_config.transport_config(Arc::new(transport));
@@ -129,6 +137,15 @@ async fn run(options: Opt) -> Result<()> {
             info!(%new_addr, "new external address report");
         }
     });
+
+    let mut path_events = conn.path_events();
+    tokio::spawn(async move {
+        while let Some(Ok(event)) = path_events.next().await {
+            info!(?event, "path event");
+        }
+    });
+    // Kept alive for the whole run: the path points at this socket.
+    let (unreachable_path, _black_hole) = open_unreachable_path(&conn).await?;
 
     let (mut send, mut recv) = conn
         .open_bi()
@@ -159,12 +176,53 @@ async fn run(options: Opt) -> Result<()> {
     );
     io::stdout().write_all(&resp).unwrap();
     io::stdout().flush().unwrap();
+    eprintln!("staying connected for {}s", LINGER.as_secs());
+    tokio::time::sleep(LINGER).await;
+    eprintln!(
+        "path {:?} after {}s: {}",
+        unreachable_path,
+        LINGER.as_secs(),
+        match conn.path(unreachable_path) {
+            Some(path) => format!("still here, path_status() = {:?}", path.status()),
+            None => "gone".to_owned(),
+        }
+    );
     conn.close(0u32.into(), b"done");
 
     // Give the server a fair chance to receive the close packet
     endpoint.wait_all_draining().await;
 
     Ok(())
+}
+
+/// Opens a second path to an address that never answers, and gives that path an idle timeout.
+///
+/// Nothing ever reads from the returned socket, so the path never validates and the server never
+/// learns that it exists. The idle timeout is set on this path alone, so it is the only path that
+/// can time out, and nothing in this example closes it.
+async fn open_unreachable_path(conn: &noq::Connection) -> Result<(PathId, UdpSocket)> {
+    let black_hole = UdpSocket::bind("127.0.0.1:0")?;
+    let black_hole_addr = black_hole.local_addr()?;
+
+    // The server needs a moment to issue connection IDs for the second path.
+    let path_id = loop {
+        let open = conn.open_path(black_hole_addr, PathStatus::Available);
+        // Not awaited: the address never answers, so the path never finishes opening.
+        if let Some(path_id) = open.path_id() {
+            break path_id;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    conn.path(path_id)
+        .ok_or_else(|| anyhow!("path {path_id:?} vanished"))?
+        .set_max_idle_timeout(Some(PATH_IDLE_TIMEOUT))?;
+    eprintln!(
+        "path {:?} open to {}, which never answers: idle timeout {}s, nothing here closes it",
+        path_id,
+        black_hole_addr,
+        PATH_IDLE_TIMEOUT.as_secs()
+    );
+    Ok((path_id, black_hole))
 }
 
 fn strip_ipv6_brackets(host: &str) -> &str {

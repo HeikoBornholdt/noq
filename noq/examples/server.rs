@@ -135,6 +135,7 @@ async fn run(options: Opt) -> Result<()> {
         .max_concurrent_uni_streams(0_u8.into())
         .send_observed_address_reports(true)
         .receive_observed_address_reports(true);
+    transport_config.max_concurrent_multipath_paths(2);
 
     let root = Arc::<Path>::from(options.root.clone());
     if !root.exists() {
