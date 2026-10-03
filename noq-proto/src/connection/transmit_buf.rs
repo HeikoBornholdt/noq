@@ -153,7 +153,7 @@ impl<'a> TransmitBuf<'a> {
         self.buf_capacity = self.buf.len();
     }
 
-    /// Finishes the current datagram, so the next packet starts a new datagram
+    /// Finishes the current datagram, so the next packet starts a new datagram.
     ///
     /// Used when what is left of the current datagram is too small to hold another packet.
     /// The datagram then ends up shorter than the segment size: if it is the first
