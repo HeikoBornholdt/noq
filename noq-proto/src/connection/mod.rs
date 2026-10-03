@@ -1481,7 +1481,7 @@ impl Connection {
         // - If coalescing, finish packet without padding to leave space in the datagram.
         // - If not coalescing, complete the datagram:
         //   - Finish packet with padding.
-        //   - Set the transmit segment size if this is the first datagram.
+        //   - Finish the datagram, which sets the segment size if this is the first datagram.
         // - Loop: next iteration will exit the loop if nothing more to send in this space. The
         //   TransmitBuf will contain a started datagram with space if coalescing, or completely
         //   filled datagram if not coalescing.
@@ -1724,6 +1724,7 @@ impl Connection {
                 //    add space checks for CONNECTION_CLOSE in space_can_send so it would
                 //    stop a GSO batch if the datagram is too small for another
                 //    CONNECTION_CLOSE packet.
+
                 // If what is left of this datagram is too small for another packet, finish
                 // it so the next space starts a fresh datagram rather than a packet being
                 // coalesced past its end.
