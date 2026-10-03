@@ -1604,9 +1604,8 @@ impl Connection {
                 pad_datagram = PadDatagram::No;
             }
 
-            // If a previous space left a datagram whose tail is too small for another
-            // packet, its CONNECTION_CLOSE branch finished that datagram, so anything we
-            // coalesce into still has room for a whole packet.
+            // If coalescing another packet into the existing datagram, there should
+            // still be enough space for a whole packet.
             if transmit.datagram_start_offset() < transmit.len() {
                 debug_assert!(transmit.datagram_remaining_mut() >= MIN_PACKET_SPACE);
             }
