@@ -2346,6 +2346,180 @@ fn datagram_send_recv() {
 }
 
 #[test]
+fn datagram_batch_send_recv_many() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let (client_ch, server_ch) = pair.connect();
+    assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
+    assert_matches!(pair.client_datagrams(client_ch).max_size(), Some(x) if x > 0);
+
+    // Send a batch of 5 datagrams in one call.
+    const N: usize = 5;
+    let batch: Vec<Bytes> = (0..N).map(|i| Bytes::from(format!("pkt-{i}"))).collect();
+    let queued = pair
+        .client_datagrams(client_ch)
+        .send_many(&batch, true)
+        .unwrap();
+    assert_eq!(queued, N);
+
+    pair.drive();
+    assert_matches!(
+        pair.server_conn_mut(server_ch).poll(),
+        Some(Event::DatagramReceived)
+    );
+
+    // Drain with an `out` smaller than the number buffered: only `out.len()` are
+    // taken, the rest stay queued for the next call.
+    let mut out = vec![Bytes::new(); 3];
+    let got = pair.server_datagrams(server_ch).recv_many(&mut out);
+    assert_eq!(got, 3);
+    for (i, d) in out.iter().enumerate() {
+        assert_eq!(d.as_ref(), format!("pkt-{i}").as_bytes());
+    }
+    // The second call yields the remaining 2 in order; the extra slot is untouched.
+    let mut out = vec![Bytes::new(); 3];
+    let got = pair.server_datagrams(server_ch).recv_many(&mut out);
+    assert_eq!(got, 2);
+    assert_eq!(out[0].as_ref(), b"pkt-3");
+    assert_eq!(out[1].as_ref(), b"pkt-4");
+    assert!(out[2].is_empty());
+    // Buffer is now empty.
+    let mut more = vec![Bytes::new(); 1];
+    assert_eq!(pair.server_datagrams(server_ch).recv_many(&mut more), 0);
+    assert!(more[0].is_empty());
+}
+
+/// `send_many` rejects the whole batch if any datagram is too large, queueing
+/// nothing, so a size error is never a partial send.
+#[test]
+fn datagram_batch_send_rejects_oversized() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let (client_ch, server_ch) = pair.connect();
+    let max = pair.client_datagrams(client_ch).max_size().unwrap();
+
+    let oversized = Bytes::from(vec![0u8; max + 1]);
+    let ok1 = Bytes::from_static(b"ok1");
+    let ok2 = Bytes::from_static(b"ok2");
+    let batch = [ok1, oversized, ok2];
+
+    assert_matches!(
+        pair.client_datagrams(client_ch).send_many(&batch, true),
+        Err(SendDatagramError::TooLarge)
+    );
+
+    // Nothing was queued: the server sees no datagrams.
+    pair.drive();
+    assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
+    let mut out = vec![Bytes::new(); 3];
+    assert_eq!(pair.server_datagrams(server_ch).recv_many(&mut out), 0);
+}
+
+/// `send_many` with `drop = false` queues datagrams until the send buffer is
+/// full, then stops and returns the number queued, leaving the rest for the
+/// caller to retry.
+#[test]
+fn datagram_batch_send_no_drop_stops_when_full() {
+    let _guard = subscribe();
+
+    const WINDOW: usize = 100;
+    let client_cfg = ClientConfig {
+        transport: Arc::new(TransportConfig {
+            datagram_send_buffer_size: WINDOW,
+            ..TransportConfig::default()
+        }),
+        ..client_config()
+    };
+    let mut pair = Pair::default();
+    let (client_ch, server_ch) = pair.connect_with(client_cfg);
+    assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
+
+    // Each datagram is just over half the budget, so only the first fits before
+    // the buffer is full.
+    let a = Bytes::from(vec![0xA0; WINDOW / 2 + 1]);
+    let b = Bytes::from(vec![0xB0; WINDOW / 2 + 1]);
+    let queued = pair
+        .client_datagrams(client_ch)
+        .send_many(&[a.clone(), b.clone()], false)
+        .unwrap();
+    assert_eq!(queued, 1);
+
+    pair.drive();
+    assert_matches!(
+        pair.server_conn_mut(server_ch).poll(),
+        Some(Event::DatagramReceived)
+    );
+    assert_eq!(pair.server_datagrams(server_ch).recv().unwrap(), a);
+    assert_matches!(pair.server_datagrams(server_ch).recv(), None);
+}
+
+/// `send_many` with `drop = true` applies drop-oldest backpressure like repeated
+/// `send(data, true)` calls, so the newest datagrams survive.
+#[test]
+fn datagram_batch_send_drop_oldest() {
+    let _guard = subscribe();
+
+    const WINDOW: usize = 100;
+    let client_cfg = ClientConfig {
+        transport: Arc::new(TransportConfig {
+            datagram_send_buffer_size: WINDOW,
+            ..TransportConfig::default()
+        }),
+        ..client_config()
+    };
+    let mut pair = Pair::default();
+    let (client_ch, server_ch) = pair.connect_with(client_cfg);
+    assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
+    let max = pair.client_datagrams(client_ch).max_size().unwrap();
+    assert!(max > WINDOW, "MTU must exceed the test budget");
+
+    // Three datagrams, each just over half `WINDOW`, so no two fit at once. Room is
+    // made for each datagram before it is pushed, so A is displaced by B and B by C,
+    // leaving only the newest queued, exactly as send(data, true) thrice.
+    let a = Bytes::from(vec![0xA0; WINDOW / 2 + 1]);
+    let b = Bytes::from(vec![0xB0; WINDOW / 2 + 1]);
+    let c = Bytes::from(vec![0xC0; WINDOW / 2 + 1]);
+    let queued = pair
+        .client_datagrams(client_ch)
+        .send_many(&[a.clone(), b.clone(), c.clone()], true)
+        .unwrap();
+    assert_eq!(queued, 3);
+    pair.drive();
+    assert_matches!(
+        pair.server_conn_mut(server_ch).poll(),
+        Some(Event::DatagramReceived)
+    );
+    let mut out = vec![Bytes::new(); 3];
+    let got = pair.server_datagrams(server_ch).recv_many(&mut out);
+    assert_eq!(got, 1);
+    assert_eq!(out[0], c);
+
+    // Batched and single sends reject datagrams larger than the send buffer.
+    let big = Bytes::from(vec![0xD0; WINDOW + 10]);
+    assert!(big.len() < max);
+    assert_matches!(
+        pair.client_datagrams(client_ch)
+            .send_many(std::slice::from_ref(&big), true),
+        Err(SendDatagramError::TooLarge)
+    );
+}
+
+#[test]
+fn datagram_batch_send_empty_is_ok() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let (client_ch, server_ch) = pair.connect();
+    assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
+
+    // An empty batch is a no-op, not an error.
+    let queued = pair
+        .client_datagrams(client_ch)
+        .send_many(&[], true)
+        .unwrap();
+    assert_eq!(queued, 0);
+}
+
+#[test]
 fn datagram_recv_buffer_overflow() {
     let _guard = subscribe();
     const WINDOW: usize = 100;
@@ -5014,5 +5188,131 @@ fn close_during_handshake_does_not_coalesce_into_a_too_small_datagram_tail() {
         transmit.size > segment_size,
         "expected a CONNECTION_CLOSE in a further space, got {} bytes",
         transmit.size
+    );
+}
+
+/// Snapshot test to prevent accidentally skipping code-paths related to `sent_packets` stats.
+#[test]
+fn sent_packets_stats_snapshot_test() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let (client_ch, server_ch) = pair.connect();
+    pair.drive();
+
+    let client_stats = pair.client_conn_mut(client_ch).stats();
+    let server_stats = pair.server_conn_mut(server_ch).stats();
+    assert_eq!(client_stats.sent_packets, 13);
+    assert_eq!(server_stats.sent_packets, 10);
+
+    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    const MSG: &[u8] = b"Hello, World!";
+    pair.client_send(client_ch, s).write(MSG).unwrap();
+    pair.drive();
+
+    let client_stats2 = pair.client_conn_mut(client_ch).stats();
+    let server_stats2 = pair.server_conn_mut(server_ch).stats();
+    assert_eq!(client_stats2.sent_packets, 14);
+    assert_eq!(server_stats2.sent_packets, 11);
+}
+
+#[cfg(feature = "qlog")]
+#[test]
+fn qlog_packet_lost_trigger() {
+    use std::{
+        io::{self, Write},
+        sync::Mutex,
+    };
+
+    use qlog::{
+        events::{EventData, quic::PacketLostTrigger},
+        reader::{Event as QlogEvent, QlogSeqReader},
+    };
+
+    use crate::{ConnectionId, QlogConfig, QlogFactory, Side};
+
+    /// Captures the qlog trace of every connection into one buffer
+    #[derive(Clone, Default)]
+    struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl QlogFactory for SharedBuffer {
+        fn for_connection(
+            &self,
+            _side: Side,
+            _remote: SocketAddr,
+            _initial_dst_cid: ConnectionId,
+            _now: Instant,
+        ) -> Option<QlogConfig> {
+            Some(QlogConfig::new(Box::new(self.clone())))
+        }
+    }
+
+    impl Write for SharedBuffer {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let _guard = subscribe();
+    let qlog = SharedBuffer::default();
+    let mut transport = TransportConfig::default();
+    transport
+        .deterministic_packet_numbers(true)
+        .qlog_factory(Arc::new(qlog.clone()));
+    let mut config = client_config();
+    config.transport_config(Arc::new(transport));
+    let mut pair = Pair::default();
+    let (client_ch, _) = pair.connect_with(config);
+    pair.drive();
+
+    // Drop a packet, then deliver fewer later packets than the packet threshold, so that only the
+    // time threshold can declare it lost
+    pair.client_conn_mut(client_ch).ping();
+    pair.client.drive(pair.time);
+    assert_eq!(pair.client.outbound.len(), 1);
+    pair.client.outbound.clear();
+    pair.client_conn_mut(client_ch).ping();
+    pair.drive();
+
+    // Drop a packet, then deliver as many later packets as the packet threshold without advancing
+    // time, so that only the packet threshold can declare it lost
+    pair.client_conn_mut(client_ch).ping();
+    pair.client.drive(pair.time);
+    assert_eq!(pair.client.outbound.len(), 1);
+    pair.client.outbound.clear();
+    for _ in 0..3 {
+        pair.client_conn_mut(client_ch).ping();
+        pair.client.drive(pair.time);
+    }
+    assert_eq!(pair.client.outbound.len(), 3);
+    pair.drive();
+
+    assert_eq!(
+        pair.client_conn_mut(client_ch)
+            .path_stats(PathId::ZERO)
+            .unwrap()
+            .lost_packets,
+        2
+    );
+    let triggers = QlogSeqReader::new(Box::new(&qlog.0.lock().unwrap()[..]))
+        .unwrap()
+        .filter_map(|event| match event {
+            QlogEvent::Qlog(event) => match event.data {
+                EventData::QuicPacketLost(lost) => lost.trigger,
+                _ => None,
+            },
+            QlogEvent::Json(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        triggers,
+        [
+            PacketLostTrigger::TimeThreshold,
+            PacketLostTrigger::ReorderingThreshold
+        ]
     );
 }

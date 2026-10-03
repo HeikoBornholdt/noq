@@ -2,7 +2,17 @@
 
 All notable changes to noq will be documented in this file.
 
-## [1.2.0](https://github.com/n0-computer/noq/compare/noq-v1.1.0..1.2.0) - 2026-08-24
+## [1.3.0](https://github.com/n0-computer/noq/compare/noq-v1.2.0..1.3.0) - 2026-09-09
+
+### ⛰️  Features
+
+- *(proto)* Add batch send/recv APIs ([#735](https://github.com/n0-computer/noq/issues/735)) - ([bde8f94](https://github.com/n0-computer/noq/commit/bde8f94c43d3c89b5fee02354a12e8c01d651abf))
+
+### ⚙️ Miscellaneous Tasks
+
+- Update PR template to mention API changes ([#796](https://github.com/n0-computer/noq/issues/796)) - ([24312a7](https://github.com/n0-computer/noq/commit/24312a79839fd3252a7cc3d2a0a3f6c613a74083))
+
+## [noq-v1.2.0](https://github.com/n0-computer/noq/compare/noq-v1.1.0..noq-v1.2.0) - 2026-08-24
 
 ### ⛰️  Features
 
@@ -22,6 +32,7 @@ All notable changes to noq will be documented in this file.
 - Run daily CI even two hours earlier ([#767](https://github.com/n0-computer/noq/issues/767)) - ([8cae43a](https://github.com/n0-computer/noq/commit/8cae43aed1377835fd03edf5bca22b88984fd0ea))
 - Run `cargo update` and adjust `deny.toml` accordingly ([#762](https://github.com/n0-computer/noq/issues/762)) - ([5cf07f4](https://github.com/n0-computer/noq/commit/5cf07f4830270ca2262e6e2f0c190dab54936c5a))
 - Auto format and wrap comments ([#744](https://github.com/n0-computer/noq/issues/744)) - ([db9bf72](https://github.com/n0-computer/noq/commit/db9bf72ac4398276d629a825bd2ce7460f9f5d70))
+- Release - ([a62dafd](https://github.com/n0-computer/noq/commit/a62dafd56ad9f90e759e0c3917176a5969871b2c))
 
 ## [noq-v1.1.0](https://github.com/n0-computer/noq/compare/noq-v1.0.1..noq-v1.1.0) - 2026-07-20
 
