@@ -1835,11 +1835,7 @@ impl Connection {
                     builder.finish_and_track(now, self, path_id, pad_datagram);
                 }
 
-                // If this is the first datagram we set the segment size to the size of the
-                // first datagram.
-                if transmit.num_datagrams() == 1 {
-                    transmit.clip_segment_size();
-                }
+                transmit.finish_datagram();
             }
         }
     }

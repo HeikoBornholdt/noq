@@ -132,43 +132,30 @@ impl<'a> TransmitBuf<'a> {
         self.num_datagrams += 1;
     }
 
-    /// Clips the segment size to the current size
-    ///
-    /// Only valid for the first datagram, when the datagram might be smaller than the
-    /// segment size. Needed before estimating the available space in the next datagram
-    /// based on [`TransmitBuf::segment_size`].
-    ///
-    /// Use [`TransmitBuf::start_new_datagram_with_size`] if you need to reduce the size of
-    /// the last datagram in a batch.
-    pub(super) fn clip_segment_size(&mut self) {
-        debug_assert_eq!(self.num_datagrams, 1);
-        if self.buf.len() < self.segment_size {
-            trace!(
-                segment_size = self.buf.len(),
-                prev_segment_size = self.segment_size,
-                "clipped datagram size"
-            );
-        }
-        self.segment_size = self.buf.len();
-        self.buf_capacity = self.buf.len();
-    }
-
     /// Finishes the current datagram, so the next packet starts a new datagram.
     ///
-    /// Used when what is left of the current datagram is too small to hold another packet.
-    /// The datagram then ends up shorter than the segment size: if it is the first
-    /// datagram of the batch the segment size is clipped to it, otherwise the batch has to
-    /// end with it, because only the first and the last datagram of a GSO batch may be
-    /// smaller than the segment size.
+    /// The first datagram of a GSO batch sets the segment size, so if this is the first
+    /// datagram the segment size is clipped to it. Only the last datagram of a batch may
+    /// be shorter than the segment size, so if a later datagram is shorter the batch ends
+    /// with it. Finishing a datagram that fills the segment size changes nothing else.
     pub(super) fn finish_datagram(&mut self) {
         debug_assert!(self.num_datagrams > 0);
+        let datagram_len = self.buf.len() - self.datagram_start;
         if self.num_datagrams == 1 {
-            self.clip_segment_size();
-        } else {
-            // This datagram is shorter than the segment size, so the batch has to end here.
-            self.buf_capacity = self.buf.len();
+            // Clip the segment size to the first datagram, the space available in the
+            // following datagrams is estimated from it.
+            if datagram_len < self.segment_size {
+                trace!(
+                    segment_size = datagram_len,
+                    prev_segment_size = self.segment_size,
+                    "clipped datagram size"
+                );
+            }
+            self.segment_size = datagram_len;
+        } else if datagram_len < self.segment_size {
             self.max_datagrams = NonZeroUsize::new(self.num_datagrams).unwrap_or(NonZeroUsize::MIN);
         }
+        self.buf_capacity = self.buf.len();
     }
 
     /// Returns the GSO segment size
@@ -250,5 +237,29 @@ unsafe impl BufMut for TransmitBuf<'_> {
 impl BufLen for TransmitBuf<'_> {
     fn len(&self) -> usize {
         self.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MAX_DATAGRAMS: NonZeroUsize = NonZeroUsize::new(10).unwrap();
+
+    #[test]
+    fn finish_full_datagram_keeps_batch_going() {
+        let mut buf = Vec::new();
+        let mut transmit = TransmitBuf::new(&mut buf, MAX_DATAGRAMS, 1500);
+        transmit.start_new_datagram();
+        transmit.put_bytes(0, 1500);
+        transmit.finish_datagram();
+        transmit.start_new_datagram();
+        transmit.put_bytes(0, 1500);
+
+        transmit.finish_datagram();
+
+        assert_eq!(transmit.segment_size(), 1500);
+        assert_eq!(transmit.datagram_remaining_mut(), 0);
+        assert_eq!(transmit.max_datagrams(), MAX_DATAGRAMS);
     }
 }
