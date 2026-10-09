@@ -360,9 +360,13 @@ impl Connection {
             ),
         )]);
 
+        let crypto_state = CryptoState::new(crypto, init_cid, side, &mut rng);
+        #[cfg(test)]
+        let crypto_state = crypto_state.with_key_phase_size(config.initial_key_phase_size);
+
         let mut this = Self {
             endpoint_config,
-            crypto_state: CryptoState::new(crypto, init_cid, side, &mut rng),
+            crypto_state,
             handshake_cid: local_cid,
             remote_handshake_cid: remote_cid,
             local_cid_state,
@@ -4501,7 +4505,9 @@ impl Connection {
             if self
                 .paths
                 .get(&path_id)
-                .map(|p| p.data.validated && p.data.network_path == network_path)
+                .map(|p| {
+                    p.data.validated && p.data.network_path.is_probably_same_path(&network_path)
+                })
                 .unwrap_or(false)
             {
                 self.connection_close_pending = true;
@@ -6830,6 +6836,12 @@ impl Connection {
             .ok()?;
 
         Some(packet.payload.to_vec())
+    }
+
+    /// How many 1-RTT packets may still be sent before the keys are updated
+    #[cfg(test)]
+    pub(crate) fn key_phase_size(&self) -> u64 {
+        self.crypto_state.key_phase_size
     }
 
     /// The number of bytes of packets containing retransmittable frames that have not been
